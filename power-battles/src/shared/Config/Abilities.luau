@@ -1,0 +1,525 @@
+-- 25 abilities, Common -> Mythic. Every ability fires toward where the player is aiming,
+-- ragdolls whoever it hits, and (if destruction is on) tears up the map.
+--
+-- Kinds (each handled generically by AbilityService, so new abilities are pure data):
+--   Projectile  travels from the caster; explodes on impact. Count/Spread for volleys, Gravity for lobs,
+--               Pierce = passes through players (explodes on terrain).
+--   Beam        instant line after an optional charge Delay. Carve = punches through walls.
+--   Nova        burst centred on the caster.
+--   Cone        short-range cone in front of the caster.
+--   Meteor      strikes the aimed ground point after Delay. Count/Spread/Interval for barrages.
+--   Line        eruptions travel along the ground toward the aim point.
+--   Blink       teleports to the aimed point and detonates on arrival.
+--   Vortex      a slow travelling field that pulls + ticks damage, then detonates.
+--
+-- Theme colours drive the ability VFX, the player's double-jump VFX and their main-menu aura.
+-- Presets map to particle styles in Lib/VFX.luau.
+--
+-- Status (applied on hit): { Type = "Slow", Mult, Duration } | { Type = "Root", Duration }
+--                          | { Type = "DoT", Damage, Ticks, Interval, Label }
+
+local Progression = require(script.Parent.Progression)
+
+local Abilities = {}
+local rgb = Color3.fromRGB
+
+Abilities.List = {
+	-- COMMON ---------------------------------------------------------------
+	{
+		Id = "Fireball",
+		Name = "Fireball",
+		Rarity = "Common",
+		Kind = "Projectile",
+		Description = "Hurl a blazing orb that bursts on impact.",
+		Theme = { Primary = rgb(255, 120, 30), Secondary = rgb(255, 220, 90), Preset = "Fire" },
+		Stats = {
+			Damage = 20,
+			Cooldown = 5,
+			Speed = 140,
+			Range = 260,
+			Size = 2.2,
+			Radius = 7,
+			Ragdoll = 1.0,
+			Knockback = 55,
+			Destruction = 7,
+		},
+	},
+	{
+		Id = "BoulderHurl",
+		Name = "Boulder Hurl",
+		Rarity = "Common",
+		Kind = "Projectile",
+		Description = "Rip a boulder from the ground and lob it.",
+		Theme = { Primary = rgb(150, 110, 80), Secondary = rgb(210, 180, 140), Preset = "Earth" },
+		Stats = {
+			Damage = 24,
+			Cooldown = 6.5,
+			Speed = 95,
+			Gravity = 40,
+			Range = 200,
+			Size = 3,
+			Radius = 8,
+			Ragdoll = 1.3,
+			Knockback = 70,
+			Destruction = 9,
+		},
+	},
+	{
+		Id = "WindSlash",
+		Name = "Wind Slash",
+		Rarity = "Common",
+		Kind = "Projectile",
+		Description = "A flying crescent of air that cuts through everyone in its path.",
+		Theme = { Primary = rgb(190, 255, 230), Secondary = rgb(255, 255, 255), Preset = "Wind" },
+		Stats = {
+			Damage = 16,
+			Cooldown = 4,
+			Speed = 180,
+			Range = 160,
+			Size = 4,
+			Radius = 4,
+			Ragdoll = 0.6,
+			Knockback = 40,
+			Destruction = 4,
+			Pierce = true,
+		},
+	},
+	{
+		Id = "FrostShard",
+		Name = "Frost Shard",
+		Rarity = "Common",
+		Kind = "Projectile",
+		Description = "Three ice shards in a spread. Chills on hit.",
+		Theme = { Primary = rgb(140, 210, 255), Secondary = rgb(240, 250, 255), Preset = "Ice" },
+		Stats = {
+			Damage = 8,
+			Cooldown = 5,
+			Speed = 170,
+			Range = 180,
+			Size = 1.2,
+			Radius = 3,
+			Ragdoll = 0.5,
+			Knockback = 25,
+			Destruction = 3,
+			Count = 3,
+			Spread = 6,
+			Status = { Type = "Slow", Mult = 0.8, Duration = 1.5 },
+		},
+	},
+	{
+		Id = "SparkBolt",
+		Name = "Spark Bolt",
+		Rarity = "Common",
+		Kind = "Beam",
+		Description = "An instant bolt of lightning.",
+		Theme = { Primary = rgb(130, 190, 255), Secondary = rgb(255, 255, 255), Preset = "Lightning" },
+		Stats = { Damage = 17, Cooldown = 5, Range = 120, Width = 1.5, Radius = 4, Ragdoll = 0.7, Knockback = 35, Destruction = 4 },
+	},
+
+	-- UNCOMMON -------------------------------------------------------------
+	{
+		Id = "WaterLance",
+		Name = "Water Lance",
+		Rarity = "Uncommon",
+		Kind = "Projectile",
+		Description = "A high-pressure spear of water that pierces through enemies.",
+		Theme = { Primary = rgb(40, 140, 255), Secondary = rgb(160, 230, 255), Preset = "Water" },
+		Stats = {
+			Damage = 22,
+			Cooldown = 6,
+			Speed = 220,
+			Range = 220,
+			Size = 1.6,
+			Radius = 4,
+			Ragdoll = 0.8,
+			Knockback = 60,
+			Destruction = 5,
+			Pierce = true,
+		},
+	},
+	{
+		Id = "EmberBurst",
+		Name = "Ember Burst",
+		Rarity = "Uncommon",
+		Kind = "Cone",
+		Description = "Exhale a cone of embers that sets enemies ablaze.",
+		Theme = { Primary = rgb(255, 90, 20), Secondary = rgb(255, 200, 60), Preset = "Fire" },
+		Stats = {
+			Damage = 26,
+			Cooldown = 7,
+			Range = 22,
+			Angle = 50,
+			Ragdoll = 1.0,
+			Knockback = 70,
+			Destruction = 6,
+			Status = { Type = "DoT", Damage = 2, Ticks = 3, Interval = 1, Label = "Burn" },
+		},
+	},
+	{
+		Id = "GalePush",
+		Name = "Gale Push",
+		Rarity = "Uncommon",
+		Kind = "Cone",
+		Description = "A hurricane palm strike. Huge knockback.",
+		Theme = { Primary = rgb(170, 255, 220), Secondary = rgb(255, 255, 255), Preset = "Wind" },
+		Stats = { Damage = 14, Cooldown = 6, Range = 28, Angle = 60, Ragdoll = 1.4, Knockback = 120, Destruction = 5 },
+	},
+	{
+		Id = "VineSnare",
+		Name = "Vine Snare",
+		Rarity = "Uncommon",
+		Kind = "Projectile",
+		Description = "A seed that bursts into vines, rooting enemies in place.",
+		Theme = { Primary = rgb(90, 200, 60), Secondary = rgb(200, 255, 120), Preset = "Nature" },
+		Stats = {
+			Damage = 14,
+			Cooldown = 7,
+			Speed = 130,
+			Range = 180,
+			Size = 1.6,
+			Radius = 5,
+			Ragdoll = 0.6,
+			Knockback = 20,
+			Destruction = 3,
+			Status = { Type = "Root", Duration = 1.2 },
+		},
+	},
+	{
+		Id = "ShockOrb",
+		Name = "Shock Orb",
+		Rarity = "Uncommon",
+		Kind = "Vortex",
+		Description = "A slow orb of static that zaps everything near it, then pops.",
+		Theme = { Primary = rgb(100, 160, 255), Secondary = rgb(220, 240, 255), Preset = "Lightning" },
+		Stats = {
+			Damage = 12,
+			TickDamage = 4,
+			TickRate = 0.5,
+			Cooldown = 8,
+			Speed = 45,
+			Duration = 3,
+			Size = 3,
+			Radius = 12,
+			Pull = 0,
+			Ragdoll = 0.8,
+			Knockback = 50,
+			Destruction = 6,
+		},
+	},
+
+	-- RARE -----------------------------------------------------------------
+	{
+		Id = "ChainLightning",
+		Name = "Chain Lightning",
+		Rarity = "Rare",
+		Kind = "Beam",
+		Description = "A bolt that arcs to two more enemies.",
+		Theme = { Primary = rgb(120, 170, 255), Secondary = rgb(240, 250, 255), Preset = "Lightning" },
+		Stats = {
+			Damage = 22,
+			Cooldown = 7,
+			Range = 140,
+			Width = 2,
+			Radius = 5,
+			Ragdoll = 0.9,
+			Knockback = 45,
+			Destruction = 5,
+			Chain = { Count = 2, Range = 18, Falloff = 0.7 },
+		},
+	},
+	{
+		Id = "MagmaMeteor",
+		Name = "Magma Meteor",
+		Rarity = "Rare",
+		Kind = "Meteor",
+		Description = "Call a molten meteor down on the aimed spot.",
+		Theme = { Primary = rgb(255, 80, 10), Secondary = rgb(255, 190, 60), Preset = "Fire" },
+		Stats = {
+			Damage = 34,
+			Cooldown = 9,
+			Range = 160,
+			Delay = 1.0,
+			Size = 5,
+			Radius = 12,
+			Ragdoll = 1.6,
+			Knockback = 90,
+			Destruction = 14,
+			Status = { Type = "DoT", Damage = 2, Ticks = 3, Interval = 1, Label = "Burn" },
+		},
+	},
+	{
+		Id = "GlacierSpike",
+		Name = "Glacier Spike",
+		Rarity = "Rare",
+		Kind = "Line",
+		Description = "A line of ice spikes erupts toward your target.",
+		Theme = { Primary = rgb(150, 220, 255), Secondary = rgb(255, 255, 255), Preset = "Ice" },
+		Stats = {
+			Damage = 26,
+			Cooldown = 8,
+			Range = 60,
+			Count = 8,
+			Interval = 0.06,
+			Radius = 5,
+			Ragdoll = 1.2,
+			Knockback = 55,
+			Destruction = 6,
+			Status = { Type = "Slow", Mult = 0.75, Duration = 2 },
+		},
+	},
+	{
+		Id = "ShadowStep",
+		Name = "Shadow Step",
+		Rarity = "Rare",
+		Kind = "Blink",
+		Description = "Melt into shadow and burst out where you're aiming.",
+		Theme = { Primary = rgb(70, 40, 110), Secondary = rgb(170, 120, 255), Preset = "Shadow" },
+		Stats = { Damage = 22, Cooldown = 8, Range = 50, Radius = 9, Ragdoll = 1.0, Knockback = 60, Destruction = 6 },
+	},
+	{
+		Id = "CrescentWave",
+		Name = "Crescent Wave",
+		Rarity = "Rare",
+		Kind = "Projectile",
+		Description = "A giant silver crescent that slices through enemies and walls alike.",
+		Theme = { Primary = rgb(210, 220, 255), Secondary = rgb(255, 255, 255), Preset = "Holy" },
+		Stats = {
+			Damage = 28,
+			Cooldown = 8,
+			Speed = 150,
+			Range = 200,
+			Size = 6,
+			Radius = 7,
+			Ragdoll = 1.1,
+			Knockback = 65,
+			Destruction = 10,
+			Pierce = true,
+		},
+	},
+
+	-- EPIC -----------------------------------------------------------------
+	{
+		Id = "DragonsBreath",
+		Name = "Dragon's Breath",
+		Rarity = "Epic",
+		Kind = "Beam",
+		Description = "A torrent of dragonfire that carves straight through cover.",
+		Theme = { Primary = rgb(255, 70, 0), Secondary = rgb(255, 220, 100), Preset = "Fire" },
+		Stats = {
+			Damage = 36,
+			Cooldown = 11,
+			Delay = 0.35,
+			Range = 110,
+			Width = 4,
+			Radius = 8,
+			Ragdoll = 1.5,
+			Knockback = 90,
+			Destruction = 6,
+			Carve = true,
+			Status = { Type = "DoT", Damage = 3, Ticks = 2, Interval = 1, Label = "Burn" },
+		},
+	},
+	{
+		Id = "VoidRift",
+		Name = "Void Rift",
+		Rarity = "Epic",
+		Kind = "Vortex",
+		Description = "Open a drifting rift that drags enemies in, then collapses.",
+		Theme = { Primary = rgb(120, 40, 220), Secondary = rgb(20, 0, 40), Preset = "Void" },
+		Stats = {
+			Damage = 30,
+			TickDamage = 3,
+			TickRate = 0.25,
+			Cooldown = 12,
+			Speed = 30,
+			Duration = 2.5,
+			Size = 4,
+			Radius = 18,
+			Pull = 45,
+			Ragdoll = 1.6,
+			Knockback = 90,
+			Destruction = 16,
+		},
+	},
+	{
+		Id = "ThunderSpear",
+		Name = "Thunder Spear",
+		Rarity = "Epic",
+		Kind = "Projectile",
+		Description = "A javelin of pure lightning. Blindingly fast.",
+		Theme = { Primary = rgb(255, 240, 90), Secondary = rgb(255, 255, 255), Preset = "Lightning" },
+		Stats = {
+			Damage = 38,
+			Cooldown = 10,
+			Speed = 260,
+			Range = 260,
+			Size = 1.8,
+			Radius = 9,
+			Ragdoll = 1.5,
+			Knockback = 80,
+			Destruction = 10,
+		},
+	},
+	{
+		Id = "BloodMoonNova",
+		Name = "Blood Moon Nova",
+		Rarity = "Epic",
+		Kind = "Nova",
+		Description = "Erupt in a crimson shockwave that heals you for damage dealt.",
+		Theme = { Primary = rgb(220, 10, 40), Secondary = rgb(255, 120, 120), Preset = "Blood" },
+		Stats = { Damage = 34, Cooldown = 12, Radius = 20, Ragdoll = 1.6, Knockback = 110, Destruction = 16, Lifesteal = 0.3 },
+	},
+
+	-- LEGENDARY ------------------------------------------------------------
+	{
+		Id = "SolarFlareCannon",
+		Name = "Solar Flare Cannon",
+		Rarity = "Legendary",
+		Kind = "Beam",
+		Description = "Charge, then unleash a beam of sunlight that vaporises the map in its path.",
+		Theme = { Primary = rgb(255, 210, 60), Secondary = rgb(255, 255, 230), Preset = "Holy" },
+		Stats = {
+			Damage = 44,
+			Cooldown = 14,
+			Delay = 0.5,
+			Range = 200,
+			Width = 6,
+			Radius = 12,
+			Ragdoll = 2.0,
+			Knockback = 120,
+			Destruction = 9,
+			Carve = true,
+		},
+	},
+	{
+		Id = "AbyssalHands",
+		Name = "Abyssal Hands",
+		Rarity = "Legendary",
+		Kind = "Meteor",
+		Description = "Hands claw up out of the ground around the target, holding them fast.",
+		Theme = { Primary = rgb(0, 200, 170), Secondary = rgb(0, 40, 50), Preset = "Void" },
+		Stats = {
+			Damage = 14,
+			Cooldown = 13,
+			Range = 140,
+			Delay = 0.7,
+			Interval = 0.1,
+			Count = 5,
+			Spread = 10,
+			Size = 3,
+			Radius = 7,
+			Ragdoll = 0.8,
+			Knockback = 40,
+			Destruction = 8,
+			Status = { Type = "Root", Duration = 0.8 },
+		},
+	},
+	{
+		Id = "TempestCyclone",
+		Name = "Tempest Cyclone",
+		Rarity = "Legendary",
+		Kind = "Vortex",
+		Description = "Summon a cyclone that tears through buildings and anyone near it.",
+		Theme = { Primary = rgb(150, 255, 220), Secondary = rgb(255, 255, 255), Preset = "Wind" },
+		Stats = {
+			Damage = 20,
+			TickDamage = 4,
+			TickRate = 0.25,
+			Cooldown = 14,
+			Speed = 35,
+			Duration = 3.5,
+			Size = 6,
+			Radius = 16,
+			Pull = 60,
+			Ragdoll = 1.5,
+			Knockback = 100,
+			Destruction = 12,
+		},
+	},
+	{
+		Id = "PhoenixDive",
+		Name = "Phoenix Dive",
+		Rarity = "Legendary",
+		Kind = "Blink",
+		Description = "Become a phoenix, dive onto the target and explode in flame.",
+		Theme = { Primary = rgb(255, 120, 0), Secondary = rgb(255, 240, 140), Preset = "Fire" },
+		Stats = {
+			Damage = 42,
+			Cooldown = 14,
+			Range = 70,
+			Radius = 16,
+			Ragdoll = 1.8,
+			Knockback = 110,
+			Destruction = 18,
+			Status = { Type = "DoT", Damage = 3, Ticks = 3, Interval = 1, Label = "Burn" },
+		},
+	},
+
+	-- MYTHIC ---------------------------------------------------------------
+	{
+		Id = "Starfall",
+		Name = "Starfall",
+		Rarity = "Mythic",
+		Kind = "Meteor",
+		Description = "Rain a barrage of stars down across the target area.",
+		Theme = { Primary = rgb(150, 120, 255), Secondary = rgb(255, 250, 200), Preset = "Star" },
+		Stats = {
+			Damage = 16,
+			Cooldown = 16,
+			Range = 180,
+			Delay = 0.8,
+			Interval = 0.12,
+			Count = 9,
+			Spread = 22,
+			Size = 3,
+			Radius = 9,
+			Ragdoll = 1.2,
+			Knockback = 70,
+			Destruction = 12,
+		},
+	},
+	{
+		Id = "Oblivion",
+		Name = "Oblivion",
+		Rarity = "Mythic",
+		Kind = "Vortex",
+		Description = "A collapsing star. Everything nearby is pulled in, then erased.",
+		Theme = { Primary = rgb(40, 0, 80), Secondary = rgb(255, 80, 200), Preset = "Void" },
+		Stats = {
+			Damage = 55,
+			TickDamage = 4,
+			TickRate = 0.25,
+			Cooldown = 18,
+			Speed = 50,
+			Duration = 2.2,
+			Size = 6,
+			Radius = 26,
+			Pull = 80,
+			Ragdoll = 2.2,
+			Knockback = 140,
+			Destruction = 26,
+		},
+	},
+}
+
+Abilities.ById = {}
+for _, def in Abilities.List do
+	Abilities.ById[def.Id] = def
+end
+
+-- Final stats at a card level. normalized = true ignores card level.
+function Abilities.GetStats(id: string, level: number?, normalized: boolean?)
+	local def = Abilities.ById[id] or Abilities.ById.Fireball
+	local stats = table.clone(def.Stats)
+	if not normalized then
+		local dmg = Progression.DamageMultiplier(level)
+		stats.Damage *= dmg
+		if stats.TickDamage then
+			stats.TickDamage *= dmg
+		end
+		stats.Cooldown *= Progression.CooldownMultiplier(level)
+	end
+	return stats
+end
+
+return Abilities
